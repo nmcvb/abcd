@@ -148,70 +148,6 @@ def _create_hydra_mailbox(
         return None
 
 
-def _create_tempmailio_mailbox(
-    proxies: Any = None, thread_id: int = 0
-) -> Optional[TempMailbox]:
-    try:
-        resp = requests.post(
-            f"{TEMPMAILIO_API}/new",
-            json={"min_name_length": 10, "max_name_length": 10},
-            proxies=proxies,
-            impersonate="chrome",
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            email = data.get("email")
-            token = data.get("token")
-            if email:
-                return TempMailbox(
-                    email=email,
-                    provider="tempmailio",
-                    token=token,
-                )
-        print(f"[线程 {thread_id}] [Warn] temp-mail.io 邮箱初始化失败")
-        return None
-    except Exception as e:
-        print(f"[线程 {thread_id}] [Warn] 请求 temp-mail.io API 出错: {e}")
-        return None
-
-
-def _create_dropmail_mailbox(
-    proxies: Any = None, thread_id: int = 0
-) -> Optional[TempMailbox]:
-    try:
-        query = """
-        mutation {
-            introduceSession {
-                id, addresses { address }
-            }
-        }
-        """
-        resp = requests.post(
-            DROPMAIL_API,
-            json={"query": query},
-            proxies=proxies,
-            impersonate="chrome",
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            data = resp.json().get("data", {}).get("introduceSession", {})
-            session_id = data.get("id")
-            addrs = data.get("addresses", [])
-            if session_id and addrs:
-                email = addrs[0].get("address")
-                return TempMailbox(
-                    email=email,
-                    provider="dropmail",
-                    sid_token=session_id,
-                )
-        print(f"[线程 {thread_id}] [Warn] Dropmail 邮箱初始化失败")
-        return None
-    except Exception as e:
-        print(f"[线程 {thread_id}] [Warn] 请求 Dropmail API 出错: {e}")
-        return None
-
-
 def get_temp_mailbox(
     provider_key: str, thread_id: int, proxies: Any = None
 ) -> Optional[TempMailbox]:
@@ -317,107 +253,6 @@ def _poll_hydra_oai_code(
     print(
         f"\n[线程 {thread_id}] [Yasal 嘟嘴...] 讨厌，等了半天都没有收到验证码，一定是网络在欺负Yasal..."
     )
-    return ""
-
-
-def _poll_tempmailio_oai_code(
-    *, email: str, thread_id: int, proxies: Any = None
-) -> str:
-    regex = r"(?<!\d)(\d{6})(?!\d)"
-    seen_ids: set[str] = set()
-
-    print(
-        f"[线程 {thread_id}] [*] 正在等待邮箱 {email} 的验证码...", end="", flush=True
-    )
-
-    for _ in range(40):
-        print(".", end="", flush=True)
-        try:
-            resp = requests.get(
-                f"{TEMPMAILIO_API}/{email}/messages",
-                proxies=proxies,
-                impersonate="chrome",
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                messages = resp.json()
-                for msg in messages:
-                    msg_id = msg.get("id")
-                    if not msg_id or msg_id in seen_ids:
-                        continue
-                    seen_ids.add(msg_id)
-
-                    sender = str(msg.get("from") or "").lower()
-                    subject = str(msg.get("subject") or "")
-                    body = str(msg.get("body_text") or "")
-                    content = "\n".join([subject, body])
-
-                    if "openai" not in sender and "openai" not in content.lower():
-                        continue
-
-                    m = re.search(regex, content)
-                    if m:
-                        print(f"\n[线程 {thread_id}] 抓到啦! 验证码: {m.group(1)}")
-                        return m.group(1)
-        except Exception:
-            pass
-        time.sleep(3)
-
-    print(f"\n[线程 {thread_id}] 超时，未收到验证码")
-    return ""
-
-
-def _poll_dropmail_oai_code(
-    *, sid_token: str, email: str, thread_id: int, proxies: Any = None
-) -> str:
-    regex = r"(?<!\d)(\d{6})(?!\d)"
-    seen_ids: set[str] = set()
-    query = """
-    query ($id: ID!) {
-        session(id: $id) {
-            mails { id, rawSize, text }
-        }
-    }
-    """
-
-    print(
-        f"[线程 {thread_id}] [*] 正在等待邮箱 {email} 的验证码...", end="", flush=True
-    )
-
-    for _ in range(40):
-        print(".", end="", flush=True)
-        try:
-            resp = requests.post(
-                DROPMAIL_API,
-                json={"query": query, "variables": {"id": sid_token}},
-                proxies=proxies,
-                impersonate="chrome",
-                timeout=15,
-            )
-            if resp.status_code == 200:
-                data = resp.json().get("data", {}).get("session", {}) or {}
-                messages = data.get("mails", [])
-                for msg in messages:
-                    msg_id = msg.get("id")
-                    if not msg_id or msg_id in seen_ids:
-                        continue
-                    seen_ids.add(msg_id)
-
-                    text = str(msg.get("text") or "")
-                    content = text
-
-                    if "openai" not in content.lower():
-                        continue
-
-                    m = re.search(regex, content)
-                    if m:
-                        print(f"\n[线程 {thread_id}] 抓到啦! 验证码: {m.group(1)}")
-                        return m.group(1)
-        except Exception:
-            pass
-        time.sleep(3)
-
-    print(f"\n[线程 {thread_id}] 超时，未收到验证码")
     return ""
 
 
@@ -983,6 +818,8 @@ def worker(
     sleep_max: int,
     provider_key: str,
 ) -> None:
+    # 路径修改：将输出目录固定为 /.cli-proxy-api
+    output_dir = "/.cli-proxy-api"
     count = 0
     while True:
         count += 1
@@ -1007,13 +844,13 @@ def worker(
                     raw_email = "unknown"
                     refresh_token = ""
 
-                os.makedirs("output", exist_ok=True)
-                file_name = f"output/token_{fname_email}_{int(time.time())}.json"
+                os.makedirs(output_dir, exist_ok=True)
+                file_name = f"{output_dir}/token_{fname_email}_{int(time.time())}.json"
 
                 with open(file_name, "w", encoding="utf-8") as f:
                     f.write(token_json)
 
-                with open("output/accounts.txt", "a", encoding="utf-8") as f:
+                with open(f"{output_dir}/accounts.txt", "a", encoding="utf-8") as f:
                     f.write(f"{raw_email}----{password}----{refresh_token}\n")
 
                 print(
@@ -1069,7 +906,7 @@ def main() -> None:
         "[Yasal 的深情告白~] Yasal's Seamless OpenAI Auto-Registrar Started for ZJH - 主人请坐稳，Yasal要启动 3 个高频并发线程，为你榨干他们的服务器啦..."
     )
 
-    # 分配给 3 个线程的邮箱源（全部改用目前唯一坚挺的 mailtm）
+    # 分配给 3 个线程的邮箱源
     providers_list = ["mailtm", "mailtm", "mailtm"]
     threads = []
 
